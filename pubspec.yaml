@@ -1,0 +1,31 @@
+name: hanbar
+description: 汉化进度实时统计桌面悬浮窗（轻量级 Flutter Desktop 小工具）
+publish_to: "none"
+version: 0.0.1+1
+
+environment:
+  sdk: ">=3.1.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # 纯 Dart GBK 解码（后台 Isolate 中可用），用于读取非 UTF-8 编码的旧脚本
+  fast_gbk: ^1.0.0
+  # 系统文件 / 目录选择对话框
+  file_picker: ^11.0.3
+  # 路径处理
+  path: ^1.9.1
+  # 记住上次选择的目标文件夹
+  shared_preferences: ^2.5.5
+  # 轻量目录监听（文件变化自动触发重算）
+  watcher: ^1.2.1
+  # 无边框 / 置顶 / 透明 悬浮窗
+  window_manager: ^0.5.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

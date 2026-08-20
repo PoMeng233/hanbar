@@ -16,6 +16,18 @@ import 'theme_defs.dart';
 /// 窗口最小尺寸（与 main.dart 保持一致）
 const Size kWindowMinSize = Size(150, 138);
 
+/// 窗口宽度低于此值时强制竖向布局（横向双进度条放不下）
+const double kNarrowWindowWidth = 230;
+
+/// 横竖布局切换的迟滞死区（像素）：高≈宽附近拖拽缩放时，
+/// 避免两个模式逐帧抖动导致整棵子树反复重建
+const double kPortraitDeadZone = 8;
+
+/// 清洗尺寸分量：无边框窗口快速缩放的中间帧里，平台侧可能短暂传来
+/// 负值 / NaN / 无穷，负尺寸进入布局（SizedBox / Positioned / 紧约束）
+/// 会触发断言或产生 NaN 传播到 Skia 导致闪退，统一钳为非负有限值。
+double _sanitizeExtent(double v) => (v.isFinite && v > 0) ? v : 0.0;
+
 /// 偏好设置 key
 const String _kPrefTarget = 'han_clock.target';
 const String _kPrefSingleFile = 'han_clock.single_file';
@@ -256,9 +268,7 @@ class _ProgressCardState extends State<ProgressCard> {
     _debounce = Timer(const Duration(milliseconds: 500), _refresh);
   }
 
-  bool _samePath(String a, String b) =>
-      a.replaceAll('\\', '/').toLowerCase() ==
-      b.replaceAll('\\', '/').toLowerCase();
+  bool _samePath(String a, String b) => p.equals(a, b);
 
   // ================================================================
   // 后台扫描（Isolate 计算，不阻塞 UI）
@@ -350,7 +360,10 @@ class _ProgressCardState extends State<ProgressCard> {
       color: Colors.transparent,
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final size = Size(constraints.maxWidth, constraints.maxHeight);
+          final size = Size(
+            _sanitizeExtent(constraints.maxWidth),
+            _sanitizeExtent(constraints.maxHeight),
+          );
           // 任意位置按住左键拖动窗口；右键打开菜单
           return GestureDetector(
             behavior: HitTestBehavior.translucent,
@@ -389,7 +402,10 @@ class _ProgressCardState extends State<ProgressCard> {
   Widget _buildCard(Size size) {
     final theme = kThemes[_themeIndex];
     final percent = _result?.percent ?? 0.0;
-    return Container(
+    // RepaintBoundary：把卡片（含昂贵的大模糊阴影）隔离成独立图层，
+    // 休息提醒 / 扫描转圈等兄弟动画不再触发卡片整体重绘
+    return RepaintBoundary(
+      child: Container(
       width: size.width,
       height: size.height,
       decoration: BoxDecoration(
@@ -424,10 +440,11 @@ class _ProgressCardState extends State<ProgressCard> {
               duration: const Duration(milliseconds: 700),
               curve: Curves.easeOutCubic,
               builder: (context, value, _) =>
-                  _buildProgressArea(value, theme),
+                  _buildProgressArea(value, theme, size),
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -537,12 +554,14 @@ class _ProgressCardState extends State<ProgressCard> {
         ),
         const Spacer(),
         if (_scanning && availableWidth >= 190)
-          SizedBox(
-            width: 12,
-            height: 12,
-            child: CircularProgressIndicator(
-              strokeWidth: 1.8,
-              color: theme.accentColor,
+          RepaintBoundary(
+            child: SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(
+                strokeWidth: 1.8,
+                color: theme.accentColor,
+              ),
             ),
           ),
         SizedBox(width: availableWidth < 190 ? 1 : 3),
@@ -585,16 +604,43 @@ class _ProgressCardState extends State<ProgressCard> {
   }
 
   /// 进度区域：根据窗口宽高比自适应横向 / 竖向布局
-  Widget _buildProgressArea(double animatedPercent, AppTheme theme) {
+  /// [windowSize] 为清洗后的窗口尺寸（用于窄窗强制竖排与文本宽度计算）。
+  Widget _buildProgressArea(
+      double animatedPercent, AppTheme theme, Size windowSize) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final portrait = _targetPath != null &&
-            (constraints.maxHeight > constraints.maxWidth ||
-                MediaQuery.sizeOf(context).width < 230);
-        if (portrait) return _buildVerticalLayout(animatedPercent, theme);
+        final area = Size(
+          _sanitizeExtent(constraints.maxWidth),
+          _sanitizeExtent(constraints.maxHeight),
+        );
+        if (_decidePortrait(area, windowSize)) {
+          return _buildVerticalLayout(animatedPercent, theme, windowSize);
+        }
         return _buildHorizontalLayout(animatedPercent, theme);
       },
     );
+  }
+
+  /// 上一次生效的布局模式（横竖切换迟滞锁存）
+  bool _portraitLatched = false;
+
+  /// 横竖布局判定（带迟滞死区）。
+  /// 严格按「高>宽」切换时，在边界附近拖拽缩放会让整棵布局子树
+  /// 逐帧在两个模式间抖动重建（表现为卡顿，极端时反复触发布局异常）。
+  /// 这里保持上一次的模式，只有明显越过死区（8px）才真正切换。
+  bool _decidePortrait(Size area, Size window) {
+    bool portrait;
+    if (_targetPath == null) {
+      portrait = false;
+    } else if (window.width < kNarrowWindowWidth) {
+      portrait = true; // 窄窗口横向布局放不下，强制竖排
+    } else if (_portraitLatched) {
+      portrait = area.height > area.width - kPortraitDeadZone;
+    } else {
+      portrait = area.height > area.width + kPortraitDeadZone;
+    }
+    _portraitLatched = portrait;
+    return portrait;
   }
 
   // ---------------- 横向布局（默认） ----------------
@@ -664,14 +710,16 @@ class _ProgressCardState extends State<ProgressCard> {
   }
 
   // ---------------- 竖向布局（窗口高 > 宽） ----------------
-  Widget _buildVerticalLayout(double animatedPercent, AppTheme theme) {
+  Widget _buildVerticalLayout(
+      double animatedPercent, AppTheme theme, Size windowSize) {
     final result = _result;
     final showNumbers = _targetPath != null && result != null;
     final isTriline = result?.format == 'triline';
     final total = result?.totalLines ?? 0;
     final translated = (animatedPercent * total).round();
 
-    final availableWidth = math.max(92.0, MediaQuery.sizeOf(context).width - 20);
+    final winW = _sanitizeExtent(windowSize.width);
+    final availableWidth = math.max(92.0, winW - 20);
     final barWidth = (availableWidth * (isTriline ? 0.43 : 0.68))
         .clamp(42.0, 86.0);
 
@@ -727,7 +775,7 @@ class _ProgressCardState extends State<ProgressCard> {
         ),
         const SizedBox(height: 4),
         SizedBox(
-          width: math.min(120, MediaQuery.sizeOf(context).width - 20),
+          width: math.max(0.0, math.min(120, winW - 20)),
           child: Text(
             showNumbers ? '$translated/$total' : '--/--',
             maxLines: 1,
@@ -797,6 +845,10 @@ class _ProgressCardState extends State<ProgressCard> {
   Widget _buildResizeHandles(Size size) {
     const edge = 7.0;
     const corner = 16.0;
+    // 快速缩放的中间帧里窗口可能短暂小于最小尺寸：
+    // 负宽高的 Rect 传给 Positioned（紧约束）会触发布局断言，钳到非负。
+    final midW = math.max(0.0, size.width - corner * 2);
+    final midH = math.max(0.0, size.height - corner * 2);
 
     Widget zone(_ResizeEdge e, Rect r) {
       return Positioned.fromRect(
@@ -807,21 +859,21 @@ class _ProgressCardState extends State<ProgressCard> {
 
     return Stack(
       children: [
-        zone(_ResizeEdge.left,
-            Rect.fromLTWH(0, corner, edge, size.height - corner * 2)),
+        zone(_ResizeEdge.left, Rect.fromLTWH(0, corner, edge, midH)),
         zone(_ResizeEdge.right,
-            Rect.fromLTWH(size.width - edge, corner, edge, size.height - corner * 2)),
+            Rect.fromLTWH(math.max(0.0, size.width - edge), corner, edge, midH)),
         zone(_ResizeEdge.top,
-            Rect.fromLTWH(corner, 0, size.width - corner * 2, edge)),
+            Rect.fromLTWH(corner, 0, midW, edge)),
         zone(_ResizeEdge.bottom,
-            Rect.fromLTWH(corner, size.height - edge, size.width - corner * 2, edge)),
+            Rect.fromLTWH(corner, math.max(0.0, size.height - edge), midW, edge)),
         zone(_ResizeEdge.tl, const Rect.fromLTWH(0, 0, corner, corner)),
         zone(_ResizeEdge.tr,
-            Rect.fromLTWH(size.width - corner, 0, corner, corner)),
+            Rect.fromLTWH(math.max(0.0, size.width - corner), 0, corner, corner)),
         zone(_ResizeEdge.bl,
-            Rect.fromLTWH(0, size.height - corner, corner, corner)),
+            Rect.fromLTWH(0, math.max(0.0, size.height - corner), corner, corner)),
         zone(_ResizeEdge.br,
-            Rect.fromLTWH(size.width - corner, size.height - corner, corner, corner)),
+            Rect.fromLTWH(math.max(0.0, size.width - corner),
+                math.max(0.0, size.height - corner), corner, corner)),
       ],
     );
   }
@@ -871,7 +923,9 @@ class _ProgressCardState extends State<ProgressCard> {
       bottom: 12,
       child: IgnorePointer(
         ignoring: !_reminderVisible,
-        child: AnimatedSlide(
+        // RepaintBoundary：滑入/淡入动画只重绘提醒气泡本身，不牵连卡片
+        child: RepaintBoundary(
+          child: AnimatedSlide(
           offset: _reminderVisible ? Offset.zero : const Offset(0, 0.38),
           duration: const Duration(milliseconds: 360),
           curve: Curves.easeOutCubic,
@@ -917,6 +971,7 @@ class _ProgressCardState extends State<ProgressCard> {
             ),
           ),
         ),
+        ),
       ),
     );
   }
@@ -926,7 +981,9 @@ class _ProgressCardState extends State<ProgressCard> {
     final theme = kThemes[_themeIndex];
     final double menuWidth = math.min(248, size.width);
     final menuHeight = _menuContentHeight();
-    final double maxH = size.height - 8;
+    // 钳非负：缩放中间帧窗口可能极小，负的 maxHeight 约束会触发断言
+    final double maxH = math.max(0.0, size.height - 8);
+    final bool narrow = size.width < 190;
 
     // 锚点自适应：超出卡片右 / 下边界时翻转方向，保证菜单完整可见。
     // 窗口比菜单还小时（竖向拉高窗口），菜单顶部对齐并内部滚动，
@@ -961,23 +1018,20 @@ class _ProgressCardState extends State<ProgressCard> {
                   Icons.create_new_folder_outlined,
                   '选择目标文件夹…',
                   () => _runMenuAction(_chooseFolder),
+                  narrow: narrow,
                 ),
                 _menuItem(
                   Icons.description_outlined,
                   '选择目标文件…',
                   () => _runMenuAction(_chooseFile),
+                  narrow: narrow,
                 ),
                 _menuItem(Icons.refresh, '立即刷新',
-                    () => _runMenuAction(_refresh)),
+                    () => _runMenuAction(_refresh), narrow: narrow),
                 _menuDivider(theme),
                 _menuSectionTitle('配色方案', theme),
                 Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    MediaQuery.sizeOf(context).width < 190 ? 6 : 14,
-                    4,
-                    MediaQuery.sizeOf(context).width < 190 ? 6 : 14,
-                    8,
-                  ),
+                  padding: EdgeInsets.fromLTRB(narrow ? 6 : 14, 4, narrow ? 6 : 14, 8),
                   child: Wrap(
                     spacing: 8,
                     runSpacing: 8,
@@ -989,12 +1043,7 @@ class _ProgressCardState extends State<ProgressCard> {
                 ),
                 _menuSectionTitle('进度条样式', theme),
                 Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    MediaQuery.sizeOf(context).width < 190 ? 6 : 14,
-                    4,
-                    MediaQuery.sizeOf(context).width < 190 ? 6 : 14,
-                    10,
-                  ),
+                  padding: EdgeInsets.fromLTRB(narrow ? 6 : 14, 4, narrow ? 6 : 14, 10),
                   child: Wrap(
                     spacing: 6,
                     runSpacing: 6,
@@ -1004,12 +1053,7 @@ class _ProgressCardState extends State<ProgressCard> {
                   ),
                 ),
                 Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    MediaQuery.sizeOf(context).width < 190 ? 6 : 14,
-                    0,
-                    MediaQuery.sizeOf(context).width < 190 ? 6 : 14,
-                    8,
-                  ),
+                  padding: EdgeInsets.fromLTRB(narrow ? 6 : 14, 0, narrow ? 6 : 14, 8),
                   child: Row(
                     children: [
                       Expanded(
@@ -1022,7 +1066,7 @@ class _ProgressCardState extends State<ProgressCard> {
                         ),
                       ),
                       Transform.scale(
-                        scale: MediaQuery.sizeOf(context).width < 190 ? 0.72 : 1,
+                        scale: narrow ? 0.72 : 1,
                         child: Switch(
                           value: _animations,
                           onChanged: _setAnimations,
@@ -1035,7 +1079,8 @@ class _ProgressCardState extends State<ProgressCard> {
                   ),
                 ),
                 _menuDivider(theme),
-                _menuItem(Icons.logout, '退出应用', _exitApp, danger: true),
+                _menuItem(Icons.logout, '退出应用', _exitApp,
+                    danger: true, narrow: narrow),
                 const SizedBox(height: 4),
               ],
             ),
@@ -1135,6 +1180,7 @@ class _ProgressCardState extends State<ProgressCard> {
     String label,
     VoidCallback onTap, {
     bool danger = false,
+    bool narrow = false,
   }) {
     final theme = kThemes[_themeIndex];
     final Color fg = danger ? theme.dangerColor : theme.titleColor;
@@ -1142,9 +1188,7 @@ class _ProgressCardState extends State<ProgressCard> {
       onTap: onTap,
       child: Container(
         height: 40,
-        padding: EdgeInsets.symmetric(
-          horizontal: MediaQuery.sizeOf(context).width < 190 ? 7 : 14,
-        ),
+        padding: EdgeInsets.symmetric(horizontal: narrow ? 7 : 14),
         alignment: Alignment.centerLeft,
         child: Row(
           children: [

@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import 'theme_defs.dart';
 
@@ -38,56 +39,75 @@ class ProgressBarView extends StatefulWidget {
 
 class _ProgressBarViewState extends State<ProgressBarView>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 2000),
-  );
+  /// 装饰动画重绘节流间隔（~40fps）。
+  /// 波动 / 滴水等纯装饰效果降到 40fps 肉眼无差别，
+  /// 但能把常驻重绘开销降到不足满帧率（60/120Hz）的一半，
+  /// 尤其在窗口缩放、多进度条并存时明显更流畅。
+  static const Duration _repaintInterval = Duration(milliseconds: 25);
+
+  /// 装饰动画一个循环的周期
+  static const Duration _loopPeriod = Duration(milliseconds: 2000);
+
+  late final Ticker _ticker;
+  Duration _lastRepaint = Duration.zero;
+  double _time = 0.0; // 0.0 ~ 1.0 循环相位
+
+  /// 装饰动画运行条件：开启动画 + 非经典样式 + 进度非空。
+  /// value <= 0 时所有样式都不绘制动态内容，空跑纯属浪费。
+  bool get _shouldAnimate =>
+      widget.animations &&
+      widget.style != BarStyle.classic &&
+      widget.value > 0;
 
   @override
   void initState() {
     super.initState();
-    if (widget.animations && widget.style != BarStyle.classic) {
-      _controller.repeat();
-    }
+    _ticker = createTicker(_onTick);
+    if (_shouldAnimate) _ticker.start();
+  }
+
+  void _onTick(Duration elapsed) {
+    if (elapsed - _lastRepaint < _repaintInterval) return;
+    _lastRepaint = elapsed;
+    setState(() {
+      _time = (elapsed.inMicroseconds % _loopPeriod.inMicroseconds) /
+          _loopPeriod.inMicroseconds;
+    });
   }
 
   @override
   void didUpdateWidget(covariant ProgressBarView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final shouldRun =
-        widget.animations && widget.style != BarStyle.classic;
-    if (shouldRun && !_controller.isAnimating) {
-      _controller.repeat();
-    } else if (!shouldRun && _controller.isAnimating) {
-      _controller.stop();
+    if (_shouldAnimate) {
+      if (!_ticker.isActive) {
+        _lastRepaint = Duration.zero;
+        _ticker.start();
+      }
+    } else if (_ticker.isActive) {
+      _ticker.stop();
     }
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    _ticker.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return RepaintBoundary(
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (context, _) {
-          return CustomPaint(
-            size: Size.infinite,
-            painter: _BarPainter(
-              value: widget.value,
-              orientation: widget.orientation,
-              theme: widget.theme,
-              style: widget.style,
-              isMain: widget.isMain,
-              animations: widget.animations,
-              time: _controller.value,
-            ),
-          );
-        },
+      child: CustomPaint(
+        size: Size.infinite,
+        painter: _BarPainter(
+          value: widget.value,
+          orientation: widget.orientation,
+          theme: widget.theme,
+          style: widget.style,
+          isMain: widget.isMain,
+          animations: widget.animations,
+          time: _time,
+        ),
       ),
     );
   }

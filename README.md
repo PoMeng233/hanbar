@@ -1,6 +1,6 @@
 # 汉化进度实时统计 · 桌面悬浮窗（hanbar）
 
-轻量级 Flutter Desktop（Windows / macOS）小工具：始终置顶的透明悬浮窗，
+轻量级 Flutter Desktop（Windows / macOS / Linux）小工具：始终置顶的透明悬浮窗，
 实时显示汉化脚本的翻译进度；文件被外部编辑器 / 封包工具改动时自动重算。
 vibe的，自用，动画和支持文本格式暂不完善
 
@@ -21,14 +21,15 @@ vibe的，自用，动画和支持文本格式暂不完善
 1. 安装 Flutter（3.13 及以上），并启用桌面支持：
 
    ```sh
-   flutter config --enable-windows-desktop --enable-macos-desktop
+   flutter config --enable-windows-desktop --enable-macos-desktop --enable-linux-desktop
    ```
 
-2. Windows：双击 `setup.bat`（自动生成 windows/macos 平台工程并安装依赖）。
-   macOS / 手动方式：在本目录执行
+2. Windows：双击 `setup.bat`；Linux / macOS：运行 `./setup.sh`
+   （自动生成 windows/macos/linux 平台工程并安装依赖）。
+   手动方式：在本目录执行
 
    ```sh
-   flutter create --project-name hanbar --platforms=windows,macos .
+   flutter create --project-name hanbar --platforms=windows,macos,linux .
    flutter pub get
    ```
 
@@ -37,14 +38,20 @@ vibe的，自用，动画和支持文本格式暂不完善
 3. 运行：
 
    ```sh
-   flutter run -d windows     # 或 -d macos
+   flutter run -d windows     # 或 -d macos / -d linux
    ```
 
    发布 Release：
 
    ```sh
    flutter build windows --release
+   flutter build linux --release
    ```
+
+> **Linux 依赖**：构建需 GTK 开发库（Debian/Ubuntu：
+> `sudo apt install clang cmake ninja-build pkg-config libgtk-3-dev`）；
+> 「选择文件夹 / 文件」对话框依赖 `zenity`（通常已随桌面环境安装）；
+> 透明悬浮窗需要桌面开启合成器（Wayland/GNOME/KDE 默认开启）。
 
 > **macOS 注意**：若 Release 构建无法使用「选择文件夹 / 文件」对话框，
 > 请在 `macos/Runner/Release.entitlements` 中追加：
